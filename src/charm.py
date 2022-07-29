@@ -11,93 +11,120 @@ develop a new k8s charm using the Operator Framework:
 
     https://discourse.charmhub.io/t/4208
 """
+import random
 
-import logging
-
-from ops.charm import CharmBase
-from ops.framework import StoredState
+from ops.charm import ActionEvent, RelationJoinedEvent, RelationChangedEvent, \
+    RelationDepartedEvent
 from ops.main import main
-from ops.model import ActiveStatus
+from ops.model import Unit
+
+from charms.compound_status.v0.compound_status import *
 
 logger = logging.getLogger(__name__)
+
+
+class MyPool(StatusPool):
+    # statuses are prioritised by ordering: topmost are most important.
+    # so if both workload and tls are blocked, workload will be displayed.
+    workload = Status()
+    tls = Status()
+    database = Status()
+
+    # If you want to override this ordering, you can pass `priority:int` to
+    # Status. Caveat: you can't mix implicit and explicit. Pick one.
+    # Either all statuses in a pool is passed a priority:int, or none does.
 
 
 class OperatorTemplateCharm(CharmBase):
     """Charm the service."""
 
-    _stored = StoredState()
-
     def __init__(self, *args):
         super().__init__(*args)
-        self.framework.observe(self.on.httpbin_pebble_ready, self._on_httpbin_pebble_ready)
-        self.framework.observe(self.on.config_changed, self._on_config_changed)
-        self.framework.observe(self.on.fortune_action, self._on_fortune_action)
-        self._stored.set_default(things=[])
+        # this is how you typically want to initialize the pool.
+        # All statuses in the pool start off at `unknown` until you set them
+        self.status = MyPool(self)
 
-    def _on_httpbin_pebble_ready(self, event):
-        """Define and start a workload using the Pebble API.
+        self.framework.observe(self.on.set_status_action,
+                               self._on_set_status_action)
+        self.framework.observe(self.on.db_relation_joined,
+                               self._on_db_relation_joined)
+        self.framework.observe(self.on.start,
+                               self._on_start)
 
-        TEMPLATE-TODO: change this example to suit your needs.
-        You'll need to specify the right entrypoint and environment
-        configuration for your specific workload. Tip: you can see the
-        standard entrypoint of an existing container using docker inspect
+    def _on_start(self, _):
+        self.unit.status = ActiveStatus('started')
 
-        Learn more about Pebble layers at https://github.com/canonical/pebble
-        """
-        # Get a reference the container attribute on the PebbleReadyEvent
-        container = event.workload
-        # Define an initial Pebble layer configuration
-        pebble_layer = {
-            "summary": "httpbin layer",
-            "description": "pebble config layer for httpbin",
-            "services": {
-                "httpbin": {
-                    "override": "replace",
-                    "summary": "httpbin",
-                    "command": "gunicorn -b 0.0.0.0:80 httpbin:app -k gevent",
-                    "startup": "enabled",
-                    "environment": {"thing": self.model.config["thing"]},
-                }
-            },
+    def _db_unit_to_status_name(self, unit: Unit):
+        # create a predictable python identifier from a remote db unit instance.
+        # we'll use these to assign a status to a relation with that unit.
+        return 'db_' + unit.name.replace('-', '_').replace('/', '_')
+
+    def _on_db_relation_joined(self, event: RelationJoinedEvent):
+        # when a remote unit joins, we create a status instance and start
+        # tracking it with maintenance.
+        new_status = Status()
+        attr = self._db_unit_to_status_name(event.unit)
+        self.status.add_status(new_status, attr)
+        self.status.set_status(attr, MaintenanceStatus('setting up'))
+        self.status.commit()
+
+    def _is_healthy(self, relation, unit):
+        # here you determine if the relation is OK, e.g.: has the remote
+        # side shared valid data?
+        return random.random() > 0.2
+
+    def _on_db_relation_changed(self, event: RelationChangedEvent):
+        # update the status of all related units.
+        for unit in event.relation.units:
+            attr = self._db_unit_to_status_name(unit)
+            my_status_for_this_unit = self.status.get_status(attr)
+            if self._is_healthy(event.relation, unit):
+                self.status.set_status(attr, ActiveStatus(f'{unit} is happy!'))
+            else:
+                self.status.set_status(attr, BlockedStatus(f'{unit} is broken!'))
+        self.status.commit()
+
+    def _on_db_relation_departed(self, event: RelationDepartedEvent):
+        # when the relation departs, we get rid of the status (delete it)
+        attr = self._db_unit_to_status_name(event.unit)
+        self.status.remove_status(self.status.get_status(attr))
+        self.status.commit()
+
+    def _on_set_status_action(self, event: ActionEvent):
+        # This is a hacky implementation of an action to allow you
+        # to manipulate (statically defined) statuses from CLI.
+        # example:
+        # juju run-action charm name=tls status=blocked message=whoopsie
+
+        status_name = event.params["name"]
+        status_type = event.params["status"]
+        status_message = event.params["message"]
+
+        status_map = {
+            'active': ActiveStatus,
+            'waiting': WaitingStatus,
+            'maintenance': MaintenanceStatus,
+            'blocked': BlockedStatus
         }
-        # Add initial Pebble config layer using the Pebble API
-        container.add_layer("httpbin", pebble_layer, combine=True)
-        # Autostart any services that were defined with startup: enabled
-        container.autostart()
-        # Learn more about statuses in the SDK docs:
-        # https://juju.is/docs/sdk/constructs#heading--statuses
-        self.unit.status = ActiveStatus()
 
-    def _on_config_changed(self, _):
-        """Just an example to show how to deal with changed configuration.
+        if status_type == 'unknown':
+            # if you want to stop tracking a status (because it becomes irrelevant
+            # or no longer applicable, you have to `unset()` it.)
+            self.status.get_status(status_name).unset()
+            self.status.commit()
+            return
 
-        TEMPLATE-TODO: change this example to suit your needs.
-        If you don't need to handle config, you can remove this method,
-        the hook created in __init__.py for it, the corresponding test,
-        and the config.py file.
+        status_class = status_map.get(status_type, None)
+        if status_class is None:
+            raise ValueError(f"unknown status type {status_type}")
 
-        Learn more about config at https://juju.is/docs/sdk/config
-        """
-        current = self.config["thing"]
-        if current not in self._stored.things:
-            logger.debug("found a new thing: %r", current)
-            self._stored.things.append(current)
+        status_inst = status_class(status_message)
+        self.status.set_status(status_name, status_inst)
 
-    def _on_fortune_action(self, event):
-        """Just an example to show how to receive actions.
-
-        TEMPLATE-TODO: change this example to suit your needs.
-        If you don't need to handle actions, you can remove this method,
-        the hook created in __init__.py for it, the corresponding test,
-        and the actions.py file.
-
-        Learn more about actions at https://juju.is/docs/sdk/actions
-        """
-        fail = event.params["fail"]
-        if fail:
-            event.fail(fail)
-        else:
-            event.set_results({"fortune": "A bug in the code is worth two in the documentation."})
+        # we tell StatusPool to set self.unit.status for us
+        # there is also a StatusPool class attr AUTO_COMMIT where this
+        # will be automatically done for you when the hook is done running.
+        self.status.commit()
 
 
 if __name__ == "__main__":

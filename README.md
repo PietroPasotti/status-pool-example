@@ -1,26 +1,31 @@
-# operator-template
+This is a demo charm to showcase the basic usage of StatusPool.
 
-## Description
+Instructions:
 
-TODO: Describe your charm in a few paragraphs of Markdown
+> charmcraft pack
+> juju deploy ./compound-status-demo_ubuntu-20.04-amd64.charm csd
+> cd db-charm
+> charmcraft pack
+> juju deploy ./db-charm_ubuntu-20.04-amd64.charm db
 
-## Usage
 
-TODO: Provide high-level usage, such as required config or relations
+At this point you should have a deployment. the status of the db relation is randomly determined by the csd charm, so there is a chance that things will start going to blocked as soon as you relate the charms.
 
-## Relations
+> juju relate csd db
 
-TODO: Provide any relations which are provided or required by your charm
+Now you can start fiddling with the set-status action to see how things play out.
 
-## OCI Images
+For example, you can:
+> juju run-action csd/0 set-status name=tls status=blocked message=whoopsie
 
-TODO: Include a link to the default image your charm uses
+This should bring the unit to `blocked` and display `(tls) whoopsie`.
+> juju run-action csd/0 set-status name=workload status=blocked message=cya
 
-## Contributing
+This should keep the unit in `blocked` but change the message to `(workload) cya`, becuse workload has higher priority (implicitly).
+Try setting manual priorities to change this behaviour!
 
-<!-- TEMPLATE-TODO: Change this URL to be the full Github path to CONTRIBUTING.md-->
+If at some point some db relation blocks because of the `_is_healthy` randomness, you can always
 
-Please see the [Juju SDK docs](https://juju.is/docs/sdk) for guidelines on enhancements to this
-charm following best practice guidelines, and
-[CONTRIBUTING.md](https://github.com/<name>/<operator>/blob/main/CONTRIBUTING.md) for developer
-guidance.
+> juju run-action csd/0 set-status name=db_db_charm_[id-of-blocking-unit] status=active message=happy
+
+Happy hacking!

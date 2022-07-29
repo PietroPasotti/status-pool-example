@@ -7,10 +7,18 @@
 #
 # Learn more about actions at: https://juju.is/docs/sdk/actions
 
-fortune:
-  description: Returns a pithy phrase.
+set-status:
+  description: force-set status
   params:
-    fail:
-      description: "Fail with this message"
+    name:
+      description: "name of the status"
+      type: string
+      default: ""
+    status:
+      description: "status type"
+      type: string
+      default: ""
+    message:
+      description: "message of the status"
       type: string
       default: ""
